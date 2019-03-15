@@ -611,9 +611,11 @@ ril_binder_mtk_radio_indication(
 
 GRilIoTransport*
 ril_binder_mtk_radio_new(
-    const char* dev,
-    const char* slot)
+    GHashTable* args)
 {
+    const char* dev = ril_binder_radio_arg_dev(args);
+    const char* slot = ril_binder_radio_arg_name(args);
+
     GBinderServiceManager* sm = gbinder_servicemanager_new(dev);
     if (sm) {
         int status = 0;
