@@ -248,6 +248,9 @@ G_STATIC_ASSERT(sizeof(RadioMtkIncomingCallNotification) == 112);
     c(270,233,sendRequestStrings,SEND_REQUEST_STRINGS) \
     c(271,229,setNattKeepAliveStatus,SET_NATT_KEEP_ALIVE_STATUS)
 
+#define RADIO_MTK_CALL_2_6(c) \
+    c(277,235,setSmsFwkReady,SET_SMS_FWK_READY) \
+
 /* e(code,eventName,EVENT_NAME) */
 #define RADIO_MTK_EVENT_2_0(e) \
     e(49,incomingCallIndication,INCOMING_CALL_INDICATION) \
@@ -320,6 +323,7 @@ typedef enum radio_mtk_req {
     RADIO_MTK_REQ_SET_RESPONSE_FUNCTIONS_IMS = 138, /*setResponseFunctionsIms*/
 #define RADIO_MTK_REQ_(req,resp,Name,NAME) RADIO_MTK_REQ_##NAME = req,
     RADIO_MTK_CALL_2_0(RADIO_MTK_REQ_)
+    RADIO_MTK_CALL_2_6(RADIO_MTK_REQ_)
 #undef RADIO_MTK_REQ_
 } RADIO_MTK_REQ;
 
@@ -328,6 +332,7 @@ typedef enum radio_mtk_resp {
     RADIO_MTK_RESP_GET_DATA_CALL_LIST = 163, /* getDataCallListResponseEx */
 #define RADIO_MTK_RESP_(req,resp,Name,NAME) RADIO_MTK_RESP_##NAME = resp,
     RADIO_MTK_CALL_2_0(RADIO_MTK_RESP_)
+    RADIO_MTK_CALL_2_6(RADIO_MTK_RESP_)
 #undef RADIO_MTK_RESP_
 } RADIO_MTK_RESP;
 
@@ -354,6 +359,7 @@ ril_radio_mtk_resp_name(
 #define RADIO_MTK_RESP_(req,resp,Name,NAME) \
     case RADIO_MTK_RESP_##NAME: return #Name "Response";
     RADIO_MTK_CALL_2_0(RADIO_MTK_RESP_)
+    RADIO_MTK_CALL_2_6(RADIO_MTK_RESP_)
 #undef RADIO_MTK_RESP_
     }
     return NULL;
@@ -435,7 +441,8 @@ ril_binder_mtk_radio_handle_incoming_call_notification(
             call->number.data.str);
         if (gutil_parse_int(call->callId.data.str, 10, &cid) &&
             gutil_parse_int(call->seqNo.data.str, 10, &seq)) {
-            GBinderLocalRequest* req = gbinder_client_new_request(self->client);
+            GBinderClient* client = self->radio_mtk_2_0;
+            GBinderLocalRequest* req = gbinder_client_new_request(client);
             GBinderWriter writer;
             guint32 serial = 0xbadf00d;
 #pragma message("TODO: request unique request id from libgrilio")
@@ -445,9 +452,8 @@ ril_binder_mtk_radio_handle_incoming_call_notification(
             gbinder_writer_append_int32(&writer, 0 /* allow */);
             gbinder_writer_append_int32(&writer, cid);
             gbinder_writer_append_int32(&writer, seq);
-            gbinder_client_transact(self->client,
-                RADIO_MTK_REQ_SET_CALL_INDICATION, GBINDER_TX_FLAG_ONEWAY,
-                req, NULL, NULL, NULL);
+            gbinder_client_transact(client, RADIO_MTK_REQ_SET_CALL_INDICATION,
+                GBINDER_TX_FLAG_ONEWAY, req, NULL, NULL, NULL);
             gbinder_local_request_unref(req);
             DBG_(self, "accepting call %d seq %d", cid, seq);
             return TRUE;
@@ -530,6 +536,23 @@ ril_binder_mtk_radio_response(
         }
         ofono_warn("Unhandled MTK IRadioResponse[2.0] %s",
             ril_binder_mtk_radio_resp_name(self, code));
+    } else if (!g_strcmp0(iface, RADIO_MTK_RESPONSE_2_6)) {
+        if (code == RADIO_MTK_RESP_SET_SMS_FWK_READY) {
+            GBinderReader reader;
+            const RadioResponseInfo* info;
+
+            gbinder_remote_request_init_reader(req, &reader);
+            info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
+            if (info) {
+                DBG_(self, "IRadioResponse[2.6] %u %s 0x%08x", code,
+                    ril_binder_mtk_radio_resp_name(self, code), info->serial);
+                *status = GBINDER_STATUS_OK;
+                return NULL;
+            }
+        } else {
+            ofono_warn("Unhandled MTK IRadioResponse[2.6] %s",
+                ril_binder_mtk_radio_resp_name(self, code));
+        }
     } else if (!g_strcmp0(iface, RADIO_RESPONSE_1_0)) {
         GBinderReader reader;
         const RadioResponseInfo* info;
@@ -613,6 +636,24 @@ ril_binder_mtk_radio_indication(
     return NULL;
 }
 
+static
+void
+ril_binder_mtk_radio_finish_init(
+    RilBinderMtkRadio* self)
+{
+    GBinderClient* client = self->radio_mtk_2_6;
+    GBinderLocalRequest* req = gbinder_client_new_request(client);
+    guint32 serial = 0xdeadbeef;
+#pragma message("TODO: request unique request id from libgrilio")
+
+    /* If we don't do this, we never get notified of incoming SMS */
+    DBG_(self, "setSmsFwkReady");
+    gbinder_local_request_append_int32(req, serial);
+    gbinder_client_transact(client, RADIO_MTK_REQ_SET_SMS_FWK_READY,
+        GBINDER_TX_FLAG_ONEWAY, req, NULL, NULL, NULL);
+    gbinder_local_request_unref(req);
+}
+
 /*==========================================================================*
  * API
  *==========================================================================*/
@@ -630,6 +671,7 @@ ril_binder_mtk_radio_new(
         char* fqname = g_strconcat(RADIO_MTK_2_0 "/", slot, NULL);
         GBinderRemoteObject* remote = gbinder_servicemanager_get_service_sync
             (sm, fqname, &status);
+
         if (remote) {
             /*
              * MTK specific response functions have to be registered before
@@ -674,8 +716,8 @@ ril_binder_mtk_radio_new(
             self->radio_mtk_2_6 = gbinder_client_new(remote, RADIO_MTK_2_6);
             self->response = gbinder_local_object_new(ipc, response_ifaces,
                 ril_binder_mtk_radio_response, self);
-            self->indication = gbinder_local_object_new(ipc, indication_ifaces,
-                ril_binder_mtk_radio_indication, self);
+            self->indication = gbinder_local_object_new(ipc,
+                indication_ifaces, ril_binder_mtk_radio_indication, self);
 
             /* IRadio::setResponseFunctionsMtk */
             req = gbinder_client_new_request(self->radio_mtk_2_0);
@@ -690,6 +732,7 @@ ril_binder_mtk_radio_new(
             if (status == GBINDER_STATUS_OK) {
                 ofono_info("Registered MTK callbacks for %s", slot);
                 if (ril_binder_radio_init_base(parent, args)) {
+                    ril_binder_mtk_radio_finish_init(self);
                     gbinder_servicemanager_unref(sm);
                     return transport;
                 }
