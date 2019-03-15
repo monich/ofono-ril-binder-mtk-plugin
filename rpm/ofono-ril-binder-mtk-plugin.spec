@@ -1,5 +1,5 @@
 Name: ofono-ril-binder-mtk-plugin
-Version: 0.0.1
+Version: 0
 Release: 1
 Summary: Ofono MediaTek RIL binder plugin
 Group: Development/Libraries
@@ -7,10 +7,10 @@ License: BSD
 URL: https://github.com/mer-hybris/ofono-ril-binder-plugin
 Source: %{name}-%{version}.tar.bz2
 
-Requires: ofono >= 1.21+git28
+Requires: ofono >= 1.21+git42
 Requires: libgrilio >= 1.0.27
 Requires: libgbinder >= 1.0.30
-BuildRequires: ofono-devel >= 1.21+git28
+BuildRequires: ofono-devel >= 1.21+git42
 BuildRequires: pkgconfig(glib-2.0)
 BuildRequires: pkgconfig(libgrilio) >= 1.0.27
 BuildRequires: pkgconfig(libgrilio-binder)

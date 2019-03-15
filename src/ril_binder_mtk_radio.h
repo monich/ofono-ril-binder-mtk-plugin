@@ -37,8 +37,7 @@
 
 GRilIoTransport*
 ril_binder_mtk_radio_new(
-    const char* dev,
-    const char* slot);
+    GHashTable* args);
 
 #endif /* RIL_BINDER_MTK_RADIO_H */
 
