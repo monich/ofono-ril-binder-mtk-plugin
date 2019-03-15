@@ -48,7 +48,8 @@ typedef RilBinderRadioClass RilBinderMtkRadioClass;
 
 typedef struct ril_binder_mtk_radio {
     RilBinderRadio parent;
-    GBinderClient* client;
+    GBinderClient* radio_mtk_2_0;
+    GBinderClient* radio_mtk_2_6;
     GBinderLocalObject* response;
     GBinderLocalObject* indication;
     GUtilIdlePool* idle;
@@ -75,17 +76,24 @@ G_DEFINE_TYPE(RilBinderMtkRadio, ril_binder_mtk_radio, RIL_TYPE_BINDER_RADIO)
 #define RADIO_MTK_IFACE_2_2(x)     RADIO_MTK_IFACE_PREFIX "2.2::" x
 #define RADIO_MTK_IFACE_2_3(x)     RADIO_MTK_IFACE_PREFIX "2.3::" x
 #define RADIO_MTK_IFACE_2_4(x)     RADIO_MTK_IFACE_PREFIX "2.4::" x
+#define RADIO_MTK_IFACE_2_5(x)     RADIO_MTK_IFACE_PREFIX "2.5::" x
+#define RADIO_MTK_IFACE_2_6(x)     RADIO_MTK_IFACE_PREFIX "2.6::" x
 #define RADIO_MTK_2_0              RADIO_MTK_IFACE_2_0("IRadio")
+#define RADIO_MTK_2_6              RADIO_MTK_IFACE_2_6("IRadio")
 #define RADIO_MTK_RESPONSE_2_0     RADIO_MTK_IFACE_2_0("IRadioResponse")
 #define RADIO_MTK_RESPONSE_2_1     RADIO_MTK_IFACE_2_1("IRadioResponse")
 #define RADIO_MTK_RESPONSE_2_2     RADIO_MTK_IFACE_2_2("IRadioResponse")
 #define RADIO_MTK_RESPONSE_2_3     RADIO_MTK_IFACE_2_3("IRadioResponse")
 #define RADIO_MTK_RESPONSE_2_4     RADIO_MTK_IFACE_2_4("IRadioResponse")
+#define RADIO_MTK_RESPONSE_2_5     RADIO_MTK_IFACE_2_5("IRadioResponse")
+#define RADIO_MTK_RESPONSE_2_6     RADIO_MTK_IFACE_2_6("IRadioResponse")
 #define RADIO_MTK_INDICATION_2_0   RADIO_MTK_IFACE_2_0("IRadioIndication")
 #define RADIO_MTK_INDICATION_2_1   RADIO_MTK_IFACE_2_1("IRadioIndication")
 #define RADIO_MTK_INDICATION_2_2   RADIO_MTK_IFACE_2_2("IRadioIndication")
 #define RADIO_MTK_INDICATION_2_3   RADIO_MTK_IFACE_2_3("IRadioIndication")
 #define RADIO_MTK_INDICATION_2_4   RADIO_MTK_IFACE_2_4("IRadioIndication")
+#define RADIO_MTK_INDICATION_2_5   RADIO_MTK_IFACE_2_5("IRadioIndication")
+#define RADIO_MTK_INDICATION_2_6   RADIO_MTK_IFACE_2_6("IRadioIndication")
 
 typedef struct radio_mtk_data_call {
     RadioDataCall dataCall RADIO_ALIGNED(8);
@@ -499,7 +507,7 @@ ril_binder_mtk_radio_response(
             gbinder_remote_request_init_reader(req, &reader);
             info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
             if (info) {
-                DBG_(self, "IRadioResponse %u %s", code,
+                DBG_(self, "IRadioResponse[2.0] %u %s", code,
                     ril_binder_mtk_radio_resp_name(self, code));
                 if (ril_binder_radio_decode_response(&self->parent, info,
                     decode, &reader)) {
@@ -514,13 +522,13 @@ ril_binder_mtk_radio_response(
             gbinder_remote_request_init_reader(req, &reader);
             info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
             if (info) {
-                DBG_(self, "IRadioResponse %u %s 0x%08x", code,
+                DBG_(self, "IRadioResponse[2.0] %u %s 0x%08x", code,
                     ril_binder_mtk_radio_resp_name(self, code), info->serial);
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
         }
-        ofono_warn("Unhandled MTK response %s",
+        ofono_warn("Unhandled MTK IRadioResponse[2.0] %s",
             ril_binder_mtk_radio_resp_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_RESPONSE_1_0)) {
         GBinderReader reader;
@@ -615,8 +623,8 @@ ril_binder_mtk_radio_new(
 {
     const char* dev = ril_binder_radio_arg_dev(args);
     const char* slot = ril_binder_radio_arg_name(args);
-
     GBinderServiceManager* sm = gbinder_servicemanager_new(dev);
+
     if (sm) {
         int status = 0;
         char* fqname = g_strconcat(RADIO_MTK_2_0 "/", slot, NULL);
@@ -638,37 +646,50 @@ ril_binder_mtk_radio_new(
             GBinderWriter writer;
 
             static const char* response_ifaces[] = {
+                RADIO_MTK_RESPONSE_2_6,
+                RADIO_MTK_RESPONSE_2_5,
+                RADIO_MTK_RESPONSE_2_4,
+                RADIO_MTK_RESPONSE_2_3,
+                RADIO_MTK_RESPONSE_2_2,
+                RADIO_MTK_RESPONSE_2_1,
                 RADIO_MTK_RESPONSE_2_0,
                 RADIO_RESPONSE_1_1,
                 RADIO_RESPONSE_1_0,
                 NULL
             };
             static const char* indication_ifaces[] = {
+                RADIO_MTK_INDICATION_2_6,
+                RADIO_MTK_INDICATION_2_5,
+                RADIO_MTK_INDICATION_2_4,
+                RADIO_MTK_INDICATION_2_3,
+                RADIO_MTK_INDICATION_2_2,
+                RADIO_MTK_INDICATION_2_1,
                 RADIO_MTK_INDICATION_2_0,
                 RADIO_INDICATION_1_1,
                 RADIO_INDICATION_1_0,
                 NULL
             };
 
-            self->client = gbinder_client_new(remote, RADIO_MTK_2_0);
+            self->radio_mtk_2_0 = gbinder_client_new(remote, RADIO_MTK_2_0);
+            self->radio_mtk_2_6 = gbinder_client_new(remote, RADIO_MTK_2_6);
             self->response = gbinder_local_object_new(ipc, response_ifaces,
                 ril_binder_mtk_radio_response, self);
             self->indication = gbinder_local_object_new(ipc, indication_ifaces,
                 ril_binder_mtk_radio_indication, self);
 
             /* IRadio::setResponseFunctionsMtk */
-            req = gbinder_client_new_request(self->client);
+            req = gbinder_client_new_request(self->radio_mtk_2_0);
             gbinder_local_request_init_writer(req, &writer);
             gbinder_writer_append_local_object(&writer, self->response);
             gbinder_writer_append_local_object(&writer, self->indication);
-            reply = gbinder_client_transact_sync_reply(self->client,
+            reply = gbinder_client_transact_sync_reply(self->radio_mtk_2_0,
                 RADIO_MTK_REQ_SET_RESPONSE_FUNCTIONS_MTK, req, &status);
             gbinder_local_request_unref(req);
             gbinder_remote_reply_unref(reply);
 
             if (status == GBINDER_STATUS_OK) {
                 ofono_info("Registered MTK callbacks for %s", slot);
-                if (ril_binder_radio_init(parent, dev, slot)) {
+                if (ril_binder_radio_init_base(parent, args)) {
                     gbinder_servicemanager_unref(sm);
                     return transport;
                 }
@@ -711,6 +732,8 @@ ril_binder_mtk_radio_finalize(
         gbinder_local_object_drop(self->response);
         self->response = NULL;
     }
+    gbinder_client_unref(self->radio_mtk_2_0);
+    gbinder_client_unref(self->radio_mtk_2_6);
     G_OBJECT_CLASS(PARENT_CLASS)->finalize(object);
 }
 
