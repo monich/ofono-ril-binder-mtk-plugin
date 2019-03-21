@@ -40,6 +40,7 @@
 #include <grilio_encode.h>
 
 #include <gutil_idlepool.h>
+#include <gutil_log.h>
 #include <gutil_misc.h>
 
 #include <ofono/log.h>
@@ -746,6 +747,40 @@ ril_binder_mtk_radio_new(
     }
     return NULL;
 }
+
+/*==========================================================================*
+ * Logging
+ *==========================================================================*/
+
+static
+void
+ril_binder_mtk_radio_gbinder_log_notify(
+    struct ofono_debug_desc* desc)
+{
+    gbinder_log.level = (desc->flags & OFONO_DEBUG_FLAG_PRINT) ?
+        GLOG_LEVEL_VERBOSE : GLOG_LEVEL_INHERIT;
+}
+
+static struct ofono_debug_desc gbinder_debug OFONO_DEBUG_ATTR = {
+    .name = "gbinder",
+    .flags = OFONO_DEBUG_FLAG_DEFAULT,
+    .notify = ril_binder_mtk_radio_gbinder_log_notify
+};
+
+static
+void
+ril_binder_mtk_radio_gbinder_radio_log_notify(
+    struct ofono_debug_desc* desc)
+{
+    gbinder_radio_log.level = (desc->flags & OFONO_DEBUG_FLAG_PRINT) ?
+        GLOG_LEVEL_VERBOSE : GLOG_LEVEL_INHERIT;
+}
+
+static struct ofono_debug_desc gbinder_radio_debug OFONO_DEBUG_ATTR = {
+    .name = "gbinder-radio",
+    .flags = OFONO_DEBUG_FLAG_DEFAULT,
+    .notify = ril_binder_mtk_radio_gbinder_radio_log_notify
+};
 
 /*==========================================================================*
  * Internals
