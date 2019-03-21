@@ -488,6 +488,23 @@ ril_binder_mtk_radio_decode_data_call_list(
 }
 
 static
+gboolean
+ril_binder_mtk_radio_decode_data_call(
+    GBinderReader* in,
+    GByteArray* out)
+{
+    const RadioMtkDataCall* call =
+        gbinder_reader_read_hidl_struct(in, RadioMtkDataCall);
+
+    if (call) {
+        ril_binder_radio_decode_data_call(out, &call->dataCall);
+        return TRUE;
+    } else {
+        return FALSE;
+    }
+}
+
+static
 GBinderLocalReply*
 ril_binder_mtk_radio_response(
     GBinderLocalObject* obj,
@@ -502,9 +519,19 @@ ril_binder_mtk_radio_response(
 
     if (!g_strcmp0(iface, RADIO_MTK_RESPONSE_2_0)) {
         /* Do we need to decode it? */
-        RilBinderRadioDecodeFunc decode =
-            (code == RADIO_MTK_RESP_GET_DATA_CALL_LIST) ?
-            ril_binder_mtk_radio_decode_data_call_list : NULL;
+        RilBinderRadioDecodeFunc decode;
+
+        switch (code) {
+        case RADIO_MTK_RESP_GET_DATA_CALL_LIST:
+            decode = ril_binder_mtk_radio_decode_data_call_list;
+            break;
+        case RADIO_MTK_RESP_SETUP_DATA_CALL:
+            decode = ril_binder_mtk_radio_decode_data_call;
+            break;
+        default:
+            decode = NULL;
+            break;
+        }
 
         if (decode) {
             GBinderReader reader;
