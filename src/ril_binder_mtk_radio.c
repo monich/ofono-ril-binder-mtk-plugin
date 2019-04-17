@@ -704,6 +704,7 @@ ril_binder_mtk_radio_new(
         GBinderRemoteObject* remote = gbinder_servicemanager_get_service_sync
             (sm, fqname, &status);
 
+        g_free(fqname);
         if (remote) {
             /*
              * MTK specific response functions have to be registered before
