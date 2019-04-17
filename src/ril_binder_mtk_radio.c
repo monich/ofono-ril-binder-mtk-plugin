@@ -583,6 +583,7 @@ ril_binder_mtk_radio_response(
         }
     } else if (!g_strcmp0(iface, RADIO_RESPONSE_1_0)) {
         GBinderReader reader;
+        RilBinderRadio* parent = &self->parent;
         const RadioResponseInfo* info;
 
         gbinder_remote_request_init_reader(req, &reader);
@@ -590,14 +591,15 @@ ril_binder_mtk_radio_response(
         if (info) {
             RilBinderRadioClass* klass = RIL_BINDER_RADIO_GET_CLASS(self);
 
-            DBG_(self, "forwarding response %u to the base class", code);
-            if (klass->handle_response(&self->parent, code, info, &reader)) {
+            DBG_(self, "forwarding %u %s to the base class", code,
+                radio_instance_resp_name(parent->radio, code));
+            if (klass->handle_response(parent, code, info, &reader)) {
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
         }
-        ofono_warn("Unhandled response %s",
-            radio_instance_resp_name(self->parent.radio, code));
+        ofono_warn("Unhandled response %s", radio_instance_resp_name
+            (parent->radio, code));
     } else {
         ofono_warn("Unexpected response %s %u", iface, code);
     }
@@ -640,6 +642,7 @@ ril_binder_mtk_radio_indication(
         ofono_warn("Unhandled MTK indication %s",
             ril_binder_mtk_radio_ind_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_INDICATION_1_0)) {
+        RilBinderRadio* parent = &self->parent;
         GBinderReader reader;
         guint type;
 
@@ -649,14 +652,15 @@ ril_binder_mtk_radio_indication(
             RilBinderRadioClass* klass = RIL_BINDER_RADIO_GET_CLASS(self);
 
             /* Forward it to the base class */
-            DBG_(self, "forwarding indication %u to the base class", code);
-            if (klass->handle_indication(&self->parent, code, type, &reader)) {
+            DBG_(self, "forwarding %u %s to the base class", code,
+                radio_instance_ind_name(parent->radio, code));
+            if (klass->handle_indication(parent, code, type, &reader)) {
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
         }
         ofono_warn("Unhandled indication %s", radio_instance_ind_name
-            (self->parent.radio, code));
+            (parent->radio, code));
     } else {
         ofono_warn("Unexpected indication %s %u", iface, code);
     }
