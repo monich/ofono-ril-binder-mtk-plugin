@@ -54,6 +54,7 @@ typedef struct ril_binder_mtk_radio {
     GBinderLocalObject* response;
     GBinderLocalObject* indication;
     GUtilIdlePool* idle;
+    GHashTable* calls;
 } RilBinderMtkRadio;
 
 #define RIL_TYPE_BINDER_MTK_RADIO (ril_binder_mtk_radio_get_type())
@@ -343,6 +344,15 @@ typedef enum radio_mtk_ind {
 #undef RADIO_MTK_IND_
 } RADIO_MTK_IND;
 
+typedef struct ril_binder_mtk_radio_call {
+    RilBinderMtkRadio* radio;
+    RADIO_MTK_RESP resp;
+    guint timeout;
+    guint serial;
+} RilBinderMtkRadioCall;
+
+#define MTK_RADIO_CALL_TIMEOUT_SEC (30)
+
 /*==========================================================================*
  * Names
  *==========================================================================*/
@@ -425,6 +435,61 @@ ril_binder_mtk_radio_ind_name(
  *==========================================================================*/
 
 static
+inline
+GRilIoTransport*
+ril_binder_mtk_radio_transport(
+    RilBinderMtkRadio* self)
+{
+    return &self->parent.parent;
+}
+
+static
+gboolean
+ril_binder_mtk_radio_call_timeout(
+    gpointer data)
+{
+    RilBinderMtkRadioCall* call = data;
+    RilBinderMtkRadio* radio = call->radio;
+
+    call->timeout = 0;
+    g_hash_table_remove(radio->calls, GINT_TO_POINTER(call->serial));
+    return G_SOURCE_REMOVE;
+}
+
+static
+RilBinderMtkRadioCall*
+ril_binder_mtk_radio_call_new(
+    RilBinderMtkRadio* self,
+    RADIO_MTK_RESP resp)
+{
+    RilBinderMtkRadioCall* call = g_slice_new(RilBinderMtkRadioCall);
+    GRilIoTransport* transport = ril_binder_mtk_radio_transport(self);
+
+    call->radio = self;
+    call->resp = resp;
+    call->serial = grilio_transport_get_id(transport);
+    call->timeout = g_timeout_add_seconds(MTK_RADIO_CALL_TIMEOUT_SEC,
+        ril_binder_mtk_radio_call_timeout, call);
+    g_hash_table_insert(self->calls, GINT_TO_POINTER(call->serial), call);
+    return call;
+}
+
+static
+void
+ril_binder_mtk_radio_call_destroy(
+    gpointer data)
+{
+    RilBinderMtkRadioCall* call = data;
+    GRilIoTransport* transport = ril_binder_mtk_radio_transport(call->radio);
+
+    if (call->timeout) {
+        g_source_remove(call->timeout);
+    }
+    grilio_transport_release_id(transport, call->serial);
+    g_slice_free1(sizeof(*call), call);
+}
+
+static
 gboolean
 ril_binder_mtk_radio_handle_incoming_call_notification(
     RilBinderMtkRadio* self,
@@ -445,11 +510,11 @@ ril_binder_mtk_radio_handle_incoming_call_notification(
             GBinderClient* client = self->radio_mtk_2_0;
             GBinderLocalRequest* req = gbinder_client_new_request(client);
             GBinderWriter writer;
-            guint32 serial = 0xbadf00d;
-#pragma message("TODO: request unique request id from libgrilio")
+            RilBinderMtkRadioCall* call = ril_binder_mtk_radio_call_new(self,
+                RADIO_MTK_RESP_SET_CALL_INDICATION);
 
             gbinder_local_request_init_writer(req, &writer);
-            gbinder_writer_append_int32(&writer, serial);
+            gbinder_writer_append_int32(&writer, call->serial);
             gbinder_writer_append_int32(&writer, 0 /* allow */);
             gbinder_writer_append_int32(&writer, cid);
             gbinder_writer_append_int32(&writer, seq);
@@ -518,71 +583,84 @@ ril_binder_mtk_radio_response(
     const char* iface = gbinder_remote_request_interface(req);
 
     if (!g_strcmp0(iface, RADIO_MTK_RESPONSE_2_0)) {
-        /* Do we need to decode it? */
-        RilBinderRadioDecodeFunc decode;
+        GBinderReader reader;
+        const RadioResponseInfo* info;
 
-        switch (code) {
-        case RADIO_MTK_RESP_GET_DATA_CALL_LIST:
-            decode = ril_binder_mtk_radio_decode_data_call_list;
-            break;
-        case RADIO_MTK_RESP_SETUP_DATA_CALL:
-            decode = ril_binder_mtk_radio_decode_data_call;
-            break;
-        default:
-            decode = NULL;
-            break;
-        }
+        /* They all start with RadioResponseInfo */
+        gbinder_remote_request_init_reader(req, &reader);
+        info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
+        if (info) {
+            gpointer key = GINT_TO_POINTER(info->serial);
+            GHashTable* calls = self->calls;
+            RilBinderMtkRadioCall* call = g_hash_table_lookup(calls, key);
 
-        if (decode) {
-            GBinderReader reader;
-            const RadioResponseInfo* info;
-
-            /* They all start with RadioResponseInfo */
-            gbinder_remote_request_init_reader(req, &reader);
-            info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
-            if (info) {
-                DBG_(self, "IRadioResponse[2.0] %u %s", code,
-                    ril_binder_mtk_radio_resp_name(self, code));
-                if (ril_binder_radio_decode_response(&self->parent, info,
-                    decode, &reader)) {
-                    *status = GBINDER_STATUS_OK;
-                    return NULL;
-                }
-            }
-        } else if (code == RADIO_MTK_RESP_SET_CALL_INDICATION) {
-            GBinderReader reader;
-            const RadioResponseInfo* info;
-
-            gbinder_remote_request_init_reader(req, &reader);
-            info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
-            if (info) {
+            if (call) {
+                /*
+                 * We may need to do something when we receive the response
+                 * (i.e. add a handler callback to RilBinderMtkRadioCall)
+                 * but for now all we need is to release the id which is
+                 * done by ril_binder_mtk_radio_call_destroy when we remove
+                 * the call from the hashtable
+                 */
                 DBG_(self, "IRadioResponse[2.0] %u %s 0x%08x", code,
                     ril_binder_mtk_radio_resp_name(self, code), info->serial);
+                g_hash_table_remove(calls, key);
                 *status = GBINDER_STATUS_OK;
                 return NULL;
+            } else {
+                /* Do we need to decode it? */
+                RilBinderRadioDecodeFunc decode;
+
+                switch (code) {
+                case RADIO_MTK_RESP_GET_DATA_CALL_LIST:
+                    decode = ril_binder_mtk_radio_decode_data_call_list;
+                    break;
+                case RADIO_MTK_RESP_SETUP_DATA_CALL:
+                    decode = ril_binder_mtk_radio_decode_data_call;
+                    break;
+                default:
+                    decode = NULL;
+                    break;
+                }
+
+                if (decode) {
+                    DBG_(self, "IRadioResponse[2.0] %u %s", code,
+                        ril_binder_mtk_radio_resp_name(self, code));
+                    if (ril_binder_radio_decode_response(&self->parent, info,
+                        decode, &reader)) {
+                        *status = GBINDER_STATUS_OK;
+                        return NULL;
+                    }
+                }
             }
         }
         ofono_warn("Unhandled MTK IRadioResponse[2.0] %s",
             ril_binder_mtk_radio_resp_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_MTK_RESPONSE_2_6)) {
-        if (code == RADIO_MTK_RESP_SET_SMS_FWK_READY) {
-            GBinderReader reader;
-            const RadioResponseInfo* info;
+        GBinderReader reader;
+        const RadioResponseInfo* info;
 
-            gbinder_remote_request_init_reader(req, &reader);
-            info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
-            if (info) {
+        /* Same thing as for IRadioResponse@2.0 (could reuse some code?) */
+        gbinder_remote_request_init_reader(req, &reader);
+        info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
+        if (info) {
+            gpointer key = GINT_TO_POINTER(info->serial);
+            GHashTable* calls = self->calls;
+            RilBinderMtkRadioCall* call = g_hash_table_lookup(calls, key);
+
+            if (call) {
                 DBG_(self, "IRadioResponse[2.6] %u %s 0x%08x", code,
                     ril_binder_mtk_radio_resp_name(self, code), info->serial);
+                g_hash_table_remove(calls, key);
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
-        } else {
-            ofono_warn("Unhandled MTK IRadioResponse[2.6] %s",
-                ril_binder_mtk_radio_resp_name(self, code));
         }
+        ofono_warn("Unhandled MTK IRadioResponse[2.6] %s",
+            ril_binder_mtk_radio_resp_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_RESPONSE_1_0)) {
         GBinderReader reader;
+        RilBinderRadio* parent = &self->parent;
         const RadioResponseInfo* info;
 
         gbinder_remote_request_init_reader(req, &reader);
@@ -590,14 +668,15 @@ ril_binder_mtk_radio_response(
         if (info) {
             RilBinderRadioClass* klass = RIL_BINDER_RADIO_GET_CLASS(self);
 
-            DBG_(self, "forwarding response %u to the base class", code);
-            if (klass->handle_response(&self->parent, code, info, &reader)) {
+            DBG_(self, "forwarding %u %s to the base class", code,
+                radio_instance_resp_name(parent->radio, code));
+            if (klass->handle_response(parent, code, info, &reader)) {
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
         }
-        ofono_warn("Unhandled response %s",
-            radio_instance_resp_name(self->parent.radio, code));
+        ofono_warn("Unhandled response %s", radio_instance_resp_name
+            (parent->radio, code));
     } else {
         ofono_warn("Unexpected response %s %u", iface, code);
     }
@@ -640,6 +719,7 @@ ril_binder_mtk_radio_indication(
         ofono_warn("Unhandled MTK indication %s",
             ril_binder_mtk_radio_ind_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_INDICATION_1_0)) {
+        RilBinderRadio* parent = &self->parent;
         GBinderReader reader;
         guint type;
 
@@ -649,14 +729,15 @@ ril_binder_mtk_radio_indication(
             RilBinderRadioClass* klass = RIL_BINDER_RADIO_GET_CLASS(self);
 
             /* Forward it to the base class */
-            DBG_(self, "forwarding indication %u to the base class", code);
-            if (klass->handle_indication(&self->parent, code, type, &reader)) {
+            DBG_(self, "forwarding %u %s to the base class", code,
+                radio_instance_ind_name(parent->radio, code));
+            if (klass->handle_indication(parent, code, type, &reader)) {
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
         }
         ofono_warn("Unhandled indication %s", radio_instance_ind_name
-            (self->parent.radio, code));
+            (parent->radio, code));
     } else {
         ofono_warn("Unexpected indication %s %u", iface, code);
     }
@@ -671,12 +752,12 @@ ril_binder_mtk_radio_finish_init(
 {
     GBinderClient* client = self->radio_mtk_2_6;
     GBinderLocalRequest* req = gbinder_client_new_request(client);
-    guint32 serial = 0xdeadbeef;
-#pragma message("TODO: request unique request id from libgrilio")
+    RilBinderMtkRadioCall* call = ril_binder_mtk_radio_call_new(self,
+        RADIO_MTK_RESP_SET_SMS_FWK_READY);
 
     /* If we don't do this, we never get notified of incoming SMS */
     DBG_(self, "setSmsFwkReady");
-    gbinder_local_request_append_int32(req, serial);
+    gbinder_local_request_append_int32(req, call->serial);
     gbinder_client_transact(client, RADIO_MTK_REQ_SET_SMS_FWK_READY,
         GBINDER_TX_FLAG_ONEWAY, req, NULL, NULL, NULL);
     gbinder_local_request_unref(req);
@@ -700,6 +781,7 @@ ril_binder_mtk_radio_new(
         GBinderRemoteObject* remote = gbinder_servicemanager_get_service_sync
             (sm, fqname, &status);
 
+        g_free(fqname);
         if (remote) {
             /*
              * MTK specific response functions have to be registered before
@@ -760,7 +842,6 @@ ril_binder_mtk_radio_new(
             if (status == GBINDER_STATUS_OK) {
                 ofono_info("Registered MTK callbacks for %s", slot);
                 if (ril_binder_radio_init_base(parent, args)) {
-                    ril_binder_mtk_radio_finish_init(self);
                     gbinder_servicemanager_unref(sm);
                     return transport;
                 }
@@ -815,10 +896,30 @@ static struct ofono_debug_desc gbinder_radio_debug OFONO_DEBUG_ATTR = {
 
 static
 void
+ril_binder_mtk_radio_set_channel(
+    GRilIoTransport* transport,
+    GRilIoChannel* channel)
+{
+    RilBinderMtkRadio* self = RIL_BINDER_MTK_RADIO(transport);
+    GRilIoTransportClass* klass = GRILIO_TRANSPORT_CLASS(PARENT_CLASS);
+
+    if (channel) {
+        klass->set_channel(transport, channel);
+        ril_binder_mtk_radio_finish_init(self);
+    } else {
+        g_hash_table_remove_all(self->calls);
+        klass->set_channel(transport, NULL);
+    }
+}
+
+static
+void
 ril_binder_mtk_radio_init(
     RilBinderMtkRadio* self)
 {
     self->idle = gutil_idle_pool_new();
+    self->calls = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+        NULL, ril_binder_mtk_radio_call_destroy);
 }
 
 static
@@ -839,6 +940,7 @@ ril_binder_mtk_radio_finalize(
     }
     gbinder_client_unref(self->radio_mtk_2_0);
     gbinder_client_unref(self->radio_mtk_2_6);
+    g_hash_table_destroy(self->calls);
     G_OBJECT_CLASS(PARENT_CLASS)->finalize(object);
 }
 
@@ -848,8 +950,9 @@ ril_binder_mtk_radio_class_init(
     RilBinderMtkRadioClass* klass)
 {
     G_OBJECT_CLASS(klass)->finalize = ril_binder_mtk_radio_finalize;
+    GRILIO_TRANSPORT_CLASS(klass)->set_channel =
+        ril_binder_mtk_radio_set_channel;
 }
-
 
 /*
  * Local Variables:
