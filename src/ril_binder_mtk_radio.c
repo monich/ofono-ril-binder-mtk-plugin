@@ -32,6 +32,7 @@
 
 #include "ril_binder_mtk_radio.h"
 #include "ril_binder_radio_impl.h"
+#include "ril_binder_radio.h"
 
 #include <radio_instance.h>
 
@@ -39,22 +40,32 @@
 
 #include <grilio_encode.h>
 
-#include <gutil_idlepool.h>
 #include <gutil_log.h>
 #include <gutil_misc.h>
 
+#include <ofono/ril-constants.h>
+#include <ofono/watch.h>
+#include <ofono/gprs.h>
 #include <ofono/log.h>
+
+enum {
+    WATCH_EVENT_GPRS,
+    WATCH_EVENT_GPRS_SETTINGS,
+    WATCH_EVENT_COUNT
+};
 
 typedef RilBinderRadioClass RilBinderMtkRadioClass;
 
 typedef struct ril_binder_mtk_radio {
     RilBinderRadio parent;
+    GBinderClient* radio_1_0;
     GBinderClient* radio_mtk_2_0;
     GBinderClient* radio_mtk_2_6;
     GBinderLocalObject* response;
     GBinderLocalObject* indication;
-    GUtilIdlePool* idle;
     GHashTable* calls;
+    struct ofono_watch* watch;
+    gulong watch_ids[WATCH_EVENT_COUNT];
 } RilBinderMtkRadio;
 
 #define RIL_TYPE_BINDER_MTK_RADIO (ril_binder_mtk_radio_get_type())
@@ -401,10 +412,7 @@ ril_binder_mtk_radio_resp_name(
     if (known) {
         return known;
     } else if (G_LIKELY(self)) {
-        char* str = g_strdup_printf("%u", (guint)resp);
-
-        gutil_idle_pool_add(self->idle, str, g_free);
-        return str;
+        return radio_instance_resp_name(self->parent.radio, resp);
     } else {
         return NULL;
     }
@@ -421,10 +429,7 @@ ril_binder_mtk_radio_ind_name(
     if (known) {
         return known;
     } else if (G_LIKELY(self)) {
-        char* str = g_strdup_printf("%u", (guint)ind);
-
-        gutil_idle_pool_add(self->idle, str, g_free);
-        return str;
+        return radio_instance_ind_name(self->parent.radio, ind);
     } else {
         return NULL;
     }
@@ -451,6 +456,7 @@ ril_binder_mtk_radio_call_timeout(
     RilBinderMtkRadioCall* call = data;
     RilBinderMtkRadio* radio = call->radio;
 
+    DBG_(radio, "call 0x%08x timed out", call->serial);
     call->timeout = 0;
     g_hash_table_remove(radio->calls, GINT_TO_POINTER(call->serial));
     return G_SOURCE_REMOVE;
@@ -554,7 +560,7 @@ ril_binder_mtk_radio_decode_data_call_list(
 
 static
 gboolean
-ril_binder_mtk_radio_decode_data_call(
+ril_binder_mtk_radio_decode_data_call_result(
     GBinderReader* in,
     GByteArray* out)
 {
@@ -562,6 +568,8 @@ ril_binder_mtk_radio_decode_data_call(
         gbinder_reader_read_hidl_struct(in, RadioMtkDataCall);
 
     if (call) {
+        grilio_encode_int32(out, DATA_CALL_VERSION);
+        grilio_encode_int32(out, 1);
         ril_binder_radio_decode_data_call(out, &call->dataCall);
         return TRUE;
     } else {
@@ -571,7 +579,7 @@ ril_binder_mtk_radio_decode_data_call(
 
 static
 GBinderLocalReply*
-ril_binder_mtk_radio_response(
+ril_binder_mtk_radio_2_0_response(
     GBinderLocalObject* obj,
     GBinderRemoteRequest* req,
     guint code,
@@ -616,7 +624,7 @@ ril_binder_mtk_radio_response(
                     decode = ril_binder_mtk_radio_decode_data_call_list;
                     break;
                 case RADIO_MTK_RESP_SETUP_DATA_CALL:
-                    decode = ril_binder_mtk_radio_decode_data_call;
+                    decode = ril_binder_mtk_radio_decode_data_call_result;
                     break;
                 default:
                     decode = NULL;
@@ -624,8 +632,9 @@ ril_binder_mtk_radio_response(
                 }
 
                 if (decode) {
-                    DBG_(self, "IRadioResponse[2.0] %u %s", code,
-                        ril_binder_mtk_radio_resp_name(self, code));
+                    DBG_(self, "IRadioResponse[2.0] %u %s 0x%08x", code,
+                         ril_binder_mtk_radio_resp_name(self, code),
+                         info->serial);
                     if (ril_binder_radio_decode_response(&self->parent, info,
                         decode, &reader)) {
                         *status = GBINDER_STATUS_OK;
@@ -633,9 +642,12 @@ ril_binder_mtk_radio_response(
                     }
                 }
             }
+            ofono_warn("Unhandled MTK IRadioResponse[2.0] %s 0x%08x",
+                ril_binder_mtk_radio_resp_name(self, code), info->serial);
+        } else {
+            ofono_warn("Unhandled MTK IRadioResponse[2.0] %s",
+                ril_binder_mtk_radio_resp_name(self, code));
         }
-        ofono_warn("Unhandled MTK IRadioResponse[2.0] %s",
-            ril_binder_mtk_radio_resp_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_MTK_RESPONSE_2_6)) {
         GBinderReader reader;
         const RadioResponseInfo* info;
@@ -655,9 +667,12 @@ ril_binder_mtk_radio_response(
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
+            ofono_warn("Unhandled MTK IRadioResponse[2.6] %s 0x%08x",
+                ril_binder_mtk_radio_resp_name(self, code), info->serial);
+        } else {
+            ofono_warn("Unhandled MTK IRadioResponse[2.6] %s",
+                ril_binder_mtk_radio_resp_name(self, code));
         }
-        ofono_warn("Unhandled MTK IRadioResponse[2.6] %s",
-            ril_binder_mtk_radio_resp_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_RESPONSE_1_0)) {
         GBinderReader reader;
         RilBinderRadio* parent = &self->parent;
@@ -666,17 +681,18 @@ ril_binder_mtk_radio_response(
         gbinder_remote_request_init_reader(req, &reader);
         info = gbinder_reader_read_hidl_struct(&reader, RadioResponseInfo);
         if (info) {
-            RilBinderRadioClass* klass = RIL_BINDER_RADIO_GET_CLASS(self);
-
-            DBG_(self, "forwarding %u %s to the base class", code,
-                radio_instance_resp_name(parent->radio, code));
-            if (klass->handle_response(parent, code, info, &reader)) {
+            if (RIL_BINDER_RADIO_GET_CLASS(self)->
+                handle_response(parent, code, info, &reader)) {
                 *status = GBINDER_STATUS_OK;
                 return NULL;
             }
+            ofono_warn("Unhandled response %s 0x%08x %u",
+                radio_instance_resp_name(parent->radio, code),
+                info->serial, info->error);
+        } else {
+            ofono_warn("Unhandled response %s",
+                radio_instance_resp_name(parent->radio, code));
         }
-        ofono_warn("Unhandled response %s", radio_instance_resp_name
-            (parent->radio, code));
     } else {
         ofono_warn("Unexpected response %s %u", iface, code);
     }
@@ -686,7 +702,7 @@ ril_binder_mtk_radio_response(
 
 static
 GBinderLocalReply*
-ril_binder_mtk_radio_indication(
+ril_binder_mtk_radio_2_0_indication(
     GBinderLocalObject* obj,
     GBinderRemoteRequest* req,
     guint code,
@@ -695,6 +711,7 @@ ril_binder_mtk_radio_indication(
     void* user_data)
 {
     RilBinderMtkRadio* self = RIL_BINDER_MTK_RADIO(user_data);
+    RilBinderRadio* parent = &self->parent;
     const char* iface = gbinder_remote_request_interface(req);
 
     if (!g_strcmp0(iface, RADIO_MTK_INDICATION_2_0)) {
@@ -704,22 +721,50 @@ ril_binder_mtk_radio_indication(
         gbinder_remote_request_init_reader(req, &reader);
         if (gbinder_reader_read_uint32(&reader, &type) &&
             (type == RADIO_IND_UNSOLICITED || type == RADIO_IND_ACK_EXP)) {
-            switch (code) {
-            case RADIO_MTK_IND_INCOMING_CALL_INDICATION:
-                DBG_(self, "IRadioIndication %u %s", code,
+            if (code == RADIO_MTK_IND_INCOMING_CALL_INDICATION) {
+                DBG_(self, "IRadioIndication[2.0] %u %s", code,
                     ril_binder_mtk_radio_ind_name(self, code));
                 if (ril_binder_mtk_radio_handle_incoming_call_notification(self,
                     type, &reader)) {
                     *status = GBINDER_STATUS_OK;
                     return NULL;
                 }
-                break;
+            } else {
+                GBinderReader reader;
+                guint type;
+
+                gbinder_remote_request_init_reader(req, &reader);
+                if (gbinder_reader_read_uint32(&reader, &type) &&
+                    (type == RADIO_IND_UNSOLICITED ||
+                     type == RADIO_IND_ACK_EXP)) {
+                    RilBinderRadioDecodeFunc decode = NULL;
+                    guint ril_code, new_code;
+
+                    switch (code) {
+                    case RADIO_MTK_IND_DATA_CALL_LIST_CHANGED_EX:
+                        decode = ril_binder_mtk_radio_decode_data_call_list;
+                        new_code = RADIO_IND_DATA_CALL_LIST_CHANGED;
+                        ril_code = RIL_UNSOL_DATA_CALL_LIST_CHANGED;
+                        break;
+                    }
+
+                    if (decode) {
+                        DBG_(self, "IRadioIndication[2.0] %u %s -> %u %s", code,
+                            ril_binder_mtk_radio_ind_name(self, code), new_code,
+                            ril_binder_mtk_radio_ind_name(self, new_code));
+
+                        if (ril_binder_radio_decode_indication(parent,
+                            new_code, ril_code, decode, &reader)) {
+                            *status = GBINDER_STATUS_OK;
+                            return NULL;
+                        }
+                    }
+                }
             }
         }
         ofono_warn("Unhandled MTK indication %s",
             ril_binder_mtk_radio_ind_name(self, code));
     } else if (!g_strcmp0(iface, RADIO_INDICATION_1_0)) {
-        RilBinderRadio* parent = &self->parent;
         GBinderReader reader;
         guint type;
 
@@ -728,8 +773,8 @@ ril_binder_mtk_radio_indication(
             (type == RADIO_IND_UNSOLICITED || type == RADIO_IND_ACK_EXP)) {
             RilBinderRadioClass* klass = RIL_BINDER_RADIO_GET_CLASS(self);
 
-            /* Forward it to the base class */
-            DBG_(self, "forwarding %u %s to the base class", code,
+            /* Forward it to the parent */
+            DBG_(self, "forwarding %u %s to the parent", code,
                 radio_instance_ind_name(parent->radio, code));
             if (klass->handle_indication(parent, code, type, &reader)) {
                 *status = GBINDER_STATUS_OK;
@@ -747,20 +792,204 @@ ril_binder_mtk_radio_indication(
 
 static
 void
+ril_binder_mtk_radio_set_hidl_string(
+    GBinderWriter* writer,
+    GBinderHidlString* hidl,
+    const char* str)
+{
+    hidl->owns_buffer = TRUE;
+    if (str && str[0]) {
+        char* allocated;
+
+        /* Non-empty strings get duplicated */
+        hidl->len = strlen(str);
+        hidl->data.str = allocated = gbinder_writer_memdup
+            (writer, str, hidl->len + 1);
+    } else {
+        static const char empty_buf[8];
+
+        /* Empty strings point to static buffer */
+        hidl->len = 0;
+        hidl->data.str = empty_buf;
+    }
+}
+
+static
+void
+ril_binder_mtk_radio_update_data_apn(
+    RilBinderMtkRadio* self,
+    const struct ofono_gprs_primary_context* internet)
+{
+    if (internet) {
+        /* TODO: this doesn't seem to be MTK specific,
+         * move it to the base class? */
+        GBinderClient* client = self->radio_1_0;
+        GBinderLocalRequest* req = gbinder_client_new_request(client);
+        GBinderWriter writer;
+        GBinderParent parent;
+        GBinderHidlVec* vec;
+        RadioDataProfile* profile;
+        const char* proto;
+        RilBinderMtkRadioCall* call = ril_binder_mtk_radio_call_new(self,
+            RADIO_RESP_SET_DATA_PROFILE);
+
+        DBG_(self, "setDataProfile 0x%08x \"%s\"", call->serial,
+            internet->apn);
+        gbinder_local_request_init_writer(req, &writer);
+
+        profile = gbinder_writer_new0(&writer, RadioDataProfile);
+        vec = gbinder_writer_new0(&writer, GBinderHidlVec);
+        vec->data.ptr = profile;
+        vec->count = 1;
+        vec->owns_buffer = TRUE;
+
+        proto = "IP";
+        switch (internet->proto) {
+	case OFONO_GPRS_PROTO_IP: /* Default */ break;
+	case OFONO_GPRS_PROTO_IPV6: proto = "IPV6"; break;
+	case OFONO_GPRS_PROTO_IPV4V6: proto = "IPV4V6"; break;
+        }
+
+        profile->authType = RADIO_APN_AUTH_PAP_CHAP;
+        switch (internet->auth_method) {
+	case OFONO_GPRS_AUTH_METHOD_ANY:
+            /* Default */
+            break;
+	case OFONO_GPRS_AUTH_METHOD_NONE:
+            profile->authType = RADIO_APN_AUTH_NONE;
+            break;
+	case OFONO_GPRS_AUTH_METHOD_CHAP:
+            profile->authType = RADIO_APN_AUTH_CHAP;
+            break;
+	case OFONO_GPRS_AUTH_METHOD_PAP:
+            profile->authType  = RADIO_APN_AUTH_PAP;
+            break;
+        }
+
+        ril_binder_mtk_radio_set_hidl_string(&writer, &profile->apn,
+            internet->apn);
+        ril_binder_mtk_radio_set_hidl_string(&writer, &profile->protocol,
+            proto);
+        ril_binder_mtk_radio_set_hidl_string(&writer, &profile->user,
+            internet->username);
+        ril_binder_mtk_radio_set_hidl_string(&writer, &profile->password,
+            internet->password);
+        ril_binder_mtk_radio_set_hidl_string(&writer, &profile->mvnoMatchData,
+            NULL);
+        profile->supportedApnTypesBitmap = RADIO_APN_TYPE_DEFAULT;
+        profile->roamingProtocol = profile->protocol;
+        profile->enabled = TRUE;
+
+        /* oneway setDataProfileEx(int32_t serial,
+         *     vec<MtkDataProfileInfo> profiles, bool isRoaming);
+         */
+
+        /* int32_t serial */
+        gbinder_writer_append_int32(&writer, call->serial);
+
+        /* vec<MtkDataProfileInfo> profiles */
+        parent.index = gbinder_writer_append_buffer_object(&writer,
+            vec, sizeof(*vec));
+
+        parent.offset = GBINDER_HIDL_VEC_BUFFER_OFFSET;
+        parent.index = gbinder_writer_append_buffer_object_with_parent(&writer,
+            profile, sizeof(*profile), &parent);
+
+        parent.offset = G_STRUCT_OFFSET(RadioDataProfile, apn.data.str);
+        gbinder_writer_append_buffer_object_with_parent(&writer,
+	    profile->apn.data.str, profile->apn.len + 1, &parent);
+
+        parent.offset = G_STRUCT_OFFSET(RadioDataProfile, protocol.data.str);
+        gbinder_writer_append_buffer_object_with_parent(&writer,
+	    profile->protocol.data.str, profile->protocol.len + 1, &parent);
+
+        parent.offset = G_STRUCT_OFFSET(RadioDataProfile,
+            roamingProtocol.data.str);
+        gbinder_writer_append_buffer_object_with_parent(&writer,
+	    profile->roamingProtocol.data.str,
+            profile->roamingProtocol.len + 1, &parent);
+
+        parent.offset = G_STRUCT_OFFSET(RadioDataProfile, user.data.str);
+        gbinder_writer_append_buffer_object_with_parent(&writer,
+	    profile->user.data.str, profile->user.len + 1, &parent);
+
+        parent.offset = G_STRUCT_OFFSET(RadioDataProfile, password.data.str);
+        gbinder_writer_append_buffer_object_with_parent(&writer,
+	    profile->password.data.str, profile->password.len + 1, &parent);
+
+        parent.offset = G_STRUCT_OFFSET(RadioDataProfile,
+            mvnoMatchData.data.str);
+        gbinder_writer_append_buffer_object_with_parent(&writer,
+	    profile->mvnoMatchData.data.str,
+            profile->mvnoMatchData.len + 1, &parent);
+
+        /* bool isRoaming */
+        gbinder_writer_append_bool(&writer, FALSE);
+
+        gbinder_client_transact(client, RADIO_REQ_SET_DATA_PROFILE,
+            GBINDER_TX_FLAG_ONEWAY, req, NULL, NULL, self);
+        gbinder_local_request_unref(req);
+    }
+}
+
+static
+void
+ril_binder_mtk_radio_watch_gprs_cb(
+    struct ofono_watch* watch,
+    void* user_data)
+{
+    RilBinderMtkRadio* self = RIL_BINDER_MTK_RADIO(user_data);
+
+    DBG_(self, "gprs %s", watch->gprs ? "appeared" : "is gone");
+    ril_binder_mtk_radio_update_data_apn(self,
+        ofono_gprs_context_settings_by_type(watch->gprs,
+            OFONO_GPRS_CONTEXT_TYPE_INTERNET));
+}
+
+static
+void
+ril_binder_mtk_radio_watch_gprs_settings_cb(
+    struct ofono_watch* watch,
+    enum ofono_gprs_context_type type,
+    const struct ofono_gprs_primary_context* settings,
+    void* user_data)
+{
+    if (type == OFONO_GPRS_CONTEXT_TYPE_INTERNET) {
+        ril_binder_mtk_radio_update_data_apn(RIL_BINDER_MTK_RADIO(user_data),
+            settings);
+    }
+}
+
+static
+void
 ril_binder_mtk_radio_finish_init(
     RilBinderMtkRadio* self)
 {
     GBinderClient* client = self->radio_mtk_2_6;
     GBinderLocalRequest* req = gbinder_client_new_request(client);
+    struct ofono_watch* watch = self->watch;
     RilBinderMtkRadioCall* call = ril_binder_mtk_radio_call_new(self,
         RADIO_MTK_RESP_SET_SMS_FWK_READY);
 
     /* If we don't do this, we never get notified of incoming SMS */
-    DBG_(self, "setSmsFwkReady");
+    DBG_(self, "setSmsFwkReady 0x%08x", call->serial);
     gbinder_local_request_append_int32(req, call->serial);
     gbinder_client_transact(client, RADIO_MTK_REQ_SET_SMS_FWK_READY,
         GBINDER_TX_FLAG_ONEWAY, req, NULL, NULL, NULL);
     gbinder_local_request_unref(req);
+
+    /* Register watch callbacks */
+    self->watch_ids[WATCH_EVENT_GPRS] =
+        ofono_watch_add_gprs_changed_handler(watch,
+            ril_binder_mtk_radio_watch_gprs_cb, self);
+    self->watch_ids[WATCH_EVENT_GPRS_SETTINGS] =
+        ofono_watch_add_gprs_settings_changed_handler(watch,
+            ril_binder_mtk_radio_watch_gprs_settings_cb, self);
+
+    /* And update the current data access point */
+    ril_binder_mtk_radio_update_data_apn(self,
+        ofono_gprs_context_settings_by_type(watch->gprs,
+            OFONO_GPRS_CONTEXT_TYPE_INTERNET));
 }
 
 /*==========================================================================*
@@ -822,12 +1051,13 @@ ril_binder_mtk_radio_new(
                 NULL
             };
 
+            self->radio_1_0 = gbinder_client_new(remote, RADIO_1_0);
             self->radio_mtk_2_0 = gbinder_client_new(remote, RADIO_MTK_2_0);
             self->radio_mtk_2_6 = gbinder_client_new(remote, RADIO_MTK_2_6);
             self->response = gbinder_local_object_new(ipc, response_ifaces,
-                ril_binder_mtk_radio_response, self);
-            self->indication = gbinder_local_object_new(ipc,
-                indication_ifaces, ril_binder_mtk_radio_indication, self);
+                ril_binder_mtk_radio_2_0_response, self);
+            self->indication = gbinder_local_object_new(ipc, indication_ifaces,
+                ril_binder_mtk_radio_2_0_indication, self);
 
             /* IRadio::setResponseFunctionsMtk */
             req = gbinder_client_new_request(self->radio_mtk_2_0);
@@ -842,6 +1072,7 @@ ril_binder_mtk_radio_new(
             if (status == GBINDER_STATUS_OK) {
                 ofono_info("Registered MTK callbacks for %s", slot);
                 if (ril_binder_radio_init_base(parent, args)) {
+                    self->watch = ofono_watch_new(parent->modem);
                     gbinder_servicemanager_unref(sm);
                     return transport;
                 }
@@ -870,7 +1101,7 @@ ril_binder_mtk_radio_gbinder_log_notify(
 }
 
 static struct ofono_debug_desc gbinder_debug OFONO_DEBUG_ATTR = {
-    .name = "gbinder",
+    .name = "binder",
     .flags = OFONO_DEBUG_FLAG_DEFAULT,
     .notify = ril_binder_mtk_radio_gbinder_log_notify
 };
@@ -885,9 +1116,24 @@ ril_binder_mtk_radio_gbinder_radio_log_notify(
 }
 
 static struct ofono_debug_desc gbinder_radio_debug OFONO_DEBUG_ATTR = {
-    .name = "gbinder-radio",
+    .name = "binder-radio",
     .flags = OFONO_DEBUG_FLAG_DEFAULT,
     .notify = ril_binder_mtk_radio_gbinder_radio_log_notify
+};
+
+static
+void
+ril_binder_mtk_radio_grilio_binder_log_notify(
+    struct ofono_debug_desc* desc)
+{
+    ril_binder_radio_log.level = (desc->flags & OFONO_DEBUG_FLAG_PRINT) ?
+        GLOG_LEVEL_VERBOSE : GLOG_LEVEL_INHERIT;
+}
+
+static struct ofono_debug_desc grilio_binder_log_debug OFONO_DEBUG_ATTR = {
+    .name = "ril-binder",
+    .flags = OFONO_DEBUG_FLAG_DEFAULT,
+    .notify = ril_binder_mtk_radio_grilio_binder_log_notify
 };
 
 /*==========================================================================*
@@ -907,8 +1153,34 @@ ril_binder_mtk_radio_set_channel(
         klass->set_channel(transport, channel);
         ril_binder_mtk_radio_finish_init(self);
     } else {
+        ofono_watch_remove_all_handlers(self->watch, self->watch_ids);
         g_hash_table_remove_all(self->calls);
         klass->set_channel(transport, NULL);
+    }
+}
+
+static
+gboolean
+ril_binder_mtk_radio_handle_response(
+    RilBinderRadio* radio,
+    RADIO_RESP code,
+    const RadioResponseInfo* info,
+    const GBinderReader* args)
+{
+    RilBinderMtkRadio* self = RIL_BINDER_MTK_RADIO(radio);
+    gpointer key = GINT_TO_POINTER(info->serial);
+    GHashTable* calls = self->calls;
+    RilBinderMtkRadioCall* call = g_hash_table_lookup(calls, key);
+
+    if (call) {
+        DBG_(self, "IRadioResponse[1.0] %u %s 0x%08x %u", code,
+             ril_binder_mtk_radio_resp_name(self, code),
+             info->serial, info->error);
+        g_hash_table_remove(calls, key);
+        return TRUE;
+    } else {
+        return RIL_BINDER_RADIO_CLASS(PARENT_CLASS)->
+            handle_response(radio, code, info, args);
     }
 }
 
@@ -917,7 +1189,6 @@ void
 ril_binder_mtk_radio_init(
     RilBinderMtkRadio* self)
 {
-    self->idle = gutil_idle_pool_new();
     self->calls = g_hash_table_new_full(g_direct_hash, g_direct_equal,
         NULL, ril_binder_mtk_radio_call_destroy);
 }
@@ -929,7 +1200,6 @@ ril_binder_mtk_radio_finalize(
 {
     RilBinderMtkRadio* self = RIL_BINDER_MTK_RADIO(object);
 
-    gutil_idle_pool_destroy(self->idle);
     if (self->indication) {
         gbinder_local_object_drop(self->indication);
         self->indication = NULL;
@@ -938,9 +1208,12 @@ ril_binder_mtk_radio_finalize(
         gbinder_local_object_drop(self->response);
         self->response = NULL;
     }
+    g_hash_table_destroy(self->calls);
+    gbinder_client_unref(self->radio_1_0);
     gbinder_client_unref(self->radio_mtk_2_0);
     gbinder_client_unref(self->radio_mtk_2_6);
-    g_hash_table_destroy(self->calls);
+    ofono_watch_remove_all_handlers(self->watch, self->watch_ids);
+    ofono_watch_unref(self->watch);
     G_OBJECT_CLASS(PARENT_CLASS)->finalize(object);
 }
 
@@ -952,6 +1225,8 @@ ril_binder_mtk_radio_class_init(
     G_OBJECT_CLASS(klass)->finalize = ril_binder_mtk_radio_finalize;
     GRILIO_TRANSPORT_CLASS(klass)->set_channel =
         ril_binder_mtk_radio_set_channel;
+    RIL_BINDER_RADIO_CLASS(klass)->handle_response =
+        ril_binder_mtk_radio_handle_response;
 }
 
 /*

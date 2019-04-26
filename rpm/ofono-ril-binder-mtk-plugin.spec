@@ -7,15 +7,15 @@ License: BSD
 URL: https://github.com/mer-hybris/ofono-ril-binder-plugin
 Source: %{name}-%{version}.tar.bz2
 
-Requires: ofono >= 1.21+git42
+Requires: ofono >= 1.21+git47
 Requires: libgrilio >= 1.0.27
 Requires: libgbinder >= 1.0.30
-Requires: libgbinder-radio >= 1.0.3
-BuildRequires: ofono-devel >= 1.21+git42
+Requires: libgbinder-radio >= 1.0.4
+BuildRequires: ofono-devel >= 1.21+git47
 BuildRequires: pkgconfig(glib-2.0)
 BuildRequires: pkgconfig(libgrilio) >= 1.0.27
 BuildRequires: pkgconfig(libgrilio-binder)
-BuildRequires: pkgconfig(libgbinder-radio) >= 1.0.3
+BuildRequires: pkgconfig(libgbinder-radio) >= 1.0.6
 BuildRequires: pkgconfig(libgbinder) >= 1.0.30
 
 %define plugin_dir %{_libdir}/ofono/plugins
